@@ -658,6 +658,9 @@ namespace IMGUIZMO_NAMESPACE
       ScaleLineCircleSize        = 6.0f;
       HatchedAxisLineThickness   = 6.0f;
       CenterCircleSize           = 6.0f;
+      GlowThickness              = 0.0f;
+      GlowAlpha                  = 0.35f;
+      HitProximity               = 8.0f;
 
       // initialize default colors
       Colors[DIRECTION_X]           = ImVec4(0.666f, 0.000f, 0.000f, 1.000f);
@@ -675,6 +678,8 @@ namespace IMGUIZMO_NAMESPACE
       Colors[HATCHED_AXIS_LINES]    = ImVec4(0.000f, 0.000f, 0.000f, 0.500f);
       Colors[TEXT]                  = ImVec4(1.000f, 1.000f, 1.000f, 1.000f);
       Colors[TEXT_SHADOW]           = ImVec4(0.000f, 0.000f, 0.000f, 1.000f);
+      Colors[CENTER_FILL]           = ImVec4(1.000f, 1.000f, 1.000f, 1.000f);
+      Colors[CENTER_BORDER]         = ImVec4(1.000f, 1.000f, 1.000f, 1.000f);
    }
 
    struct Context
@@ -780,6 +785,7 @@ namespace IMGUIZMO_NAMESPACE
 
       bool mAllowAxisFlip = true;
       float mGizmoSizeClipSpace = 0.1f;
+      float mGizmoMaxScreenFraction = 0.f;
 
       inline ImGuiID GetCurrentID()
       {
@@ -821,6 +827,24 @@ namespace IMGUIZMO_NAMESPACE
    {
       IM_ASSERT(idx < COLOR::COUNT);
       return ImGui::ColorConvertFloat4ToU32(gContext.mStyle.Colors[idx]);
+   }
+
+   // Faked soft glow: a single wide translucent stroke reads as a flat ribbon, so the glow is layered —
+   // several progressively wider, fainter passes approximating a blur falloff. Layer 0 is the widest and
+   // faintest; draw layers in ascending order, then the crisp handle stroke on top.
+   static const int kGlowLayers = 5;
+
+   static float GetGlowLayerThickness(float baseThickness, int layer)
+   {
+      return baseThickness + gContext.mStyle.GlowThickness * ((float)(kGlowLayers - layer) / (float)kGlowLayers);
+   }
+
+   static ImU32 GetGlowLayerColor(ImU32 color, int layer)
+   {
+      const float strength = (float)(layer + 1) / (float)kGlowLayers;
+      ImVec4 c = ImGui::ColorConvertU32ToFloat4(color);
+      c.w *= gContext.mStyle.GlowAlpha * strength * strength;
+      return ImGui::ColorConvertFloat4ToU32(c);
    }
 
    static ImVec2 worldToPos(const vec_t& worldPos, const matrix_t& mat, ImVec2 position = ImVec2(gContext.mX, gContext.mY), ImVec2 size = ImVec2(gContext.mWidth, gContext.mHeight))
@@ -1127,6 +1151,20 @@ namespace IMGUIZMO_NAMESPACE
       float rightLength = GetSegmentLengthClipSpace(makeVect(0.f, 0.f), rightViewInverse);
       gContext.mScreenFactor = gContext.mGizmoSizeClipSpace / rightLength;
 
+      // Near the camera/near-plane the clip-space estimate above degenerates and mScreenFactor explodes;
+      // re-measure the actual projected axis length and clamp it to a fraction of the viewport.
+      if (gContext.mGizmoMaxScreenFraction > 0.f)
+      {
+         const ImVec2 centerPx = worldToPos(makeVect(0.f, 0.f), gContext.mMVP);
+         const ImVec2 rightPx = worldToPos(rightViewInverse * gContext.mScreenFactor, gContext.mMVP);
+         const float axisPx = sqrtf(ImLengthSqr(rightPx - centerPx));
+         const float maxPx = gContext.mGizmoMaxScreenFraction * 0.5f * ImMin(gContext.mWidth, gContext.mHeight);
+         if (axisPx > maxPx && axisPx > FLT_EPSILON)
+         {
+            gContext.mScreenFactor *= maxPx / axisPx;
+         }
+      }
+
       ImVec2 centerSSpace = worldToPos(makeVect(0.f, 0.f), gContext.mMVP);
       gContext.mScreenSquareCenter = centerSSpace;
       gContext.mScreenSquareMin = ImVec2(centerSSpace.x - 10.f, centerSSpace.y - 10.f);
@@ -1312,7 +1350,8 @@ namespace IMGUIZMO_NAMESPACE
 
       viewDirNormalized.TransformVector(gContext.mModelInverse);
 
-      gContext.mRadiusSquareCenter = screenRotateSize * gContext.mHeight;
+      // Scale the screen-ring floor with the gizmo size setting (ratio 1 at the stock 0.1 default) so a resized gizmo keeps the ring hugging the axis rings.
+      gContext.mRadiusSquareCenter = screenRotateSize * gContext.mHeight * (gContext.mGizmoSizeClipSpace / 0.1f);
 
       bool hasRSC = Intersects(op, ROTATE_SCREEN);
       for (int axis = 0; axis < 3; axis++)
@@ -1344,6 +1383,13 @@ namespace IMGUIZMO_NAMESPACE
          }
          if (!gContext.mbUsing || usingAxis)
          {
+            if (gContext.mStyle.GlowThickness > 0.f && type == MT_ROTATE_Z - axis)
+            {
+               for (int glowLayer = 0; glowLayer < kGlowLayers; glowLayer++)
+               {
+                  drawList->AddPolyline(circlePos, circleMul * halfCircleSegmentCount + 1, GetGlowLayerColor(colors[3 - axis], glowLayer), GetGlowLayerThickness(gContext.mStyle.RotationLineThickness, glowLayer), 0);
+               }
+            }
             drawList->AddPolyline(circlePos, circleMul* halfCircleSegmentCount + 1, colors[3 - axis], gContext.mStyle.RotationLineThickness, 0);
          }
 
@@ -1606,6 +1652,13 @@ namespace IMGUIZMO_NAMESPACE
                ImVec2 baseSSpace = worldToPos(dirAxis * 0.1f * gContext.mScreenFactor, gContext.mMVP);
                ImVec2 worldDirSSpace = worldToPos(dirAxis * gContext.mScreenFactor, gContext.mMVP);
 
+               if (gContext.mStyle.GlowThickness > 0.f && type == MT_MOVE_X + i)
+               {
+                  for (int glowLayer = 0; glowLayer < kGlowLayers; glowLayer++)
+                  {
+                     drawList->AddLine(baseSSpace, worldDirSSpace, GetGlowLayerColor(colors[i + 1], glowLayer), GetGlowLayerThickness(gContext.mStyle.TranslationLineThickness, glowLayer));
+                  }
+               }
                drawList->AddLine(baseSSpace, worldDirSSpace, colors[i + 1], gContext.mStyle.TranslationLineThickness);
 
                // Arrow head begin
@@ -1637,13 +1690,31 @@ namespace IMGUIZMO_NAMESPACE
                   vec_t cornerWorldPos = (dirPlaneX * quadUV[j * 2] + dirPlaneY * quadUV[j * 2 + 1]) * gContext.mScreenFactor;
                   screenQuadPts[j] = worldToPos(cornerWorldPos, gContext.mMVP);
                }
+               if (gContext.mStyle.GlowThickness > 0.f && type == MT_MOVE_YZ + i)
+               {
+                  for (int glowLayer = 0; glowLayer < kGlowLayers; glowLayer++)
+                  {
+                     drawList->AddPolyline(screenQuadPts, 4, GetGlowLayerColor(colors[i + 4], glowLayer), GetGlowLayerThickness(1.0f, glowLayer), ImDrawFlags_Closed);
+                  }
+               }
                drawList->AddPolyline(screenQuadPts, 4, GetColorU32(DIRECTION_X + i), 1.0f, ImDrawFlags_Closed);
                drawList->AddConvexPolyFilled(screenQuadPts, 4, colors[i + 4]);
             }
          }
       }
 
-      drawList->AddCircleFilled(gContext.mScreenSquareCenter, gContext.mStyle.CenterCircleSize, colors[0], 32);
+      // Center pivot drawn as fill + ring + inner dot; with default (all-white) style colors this still reads as the stock solid circle.
+      const bool centerHot = (type == MT_MOVE_SCREEN);
+      if (gContext.mStyle.GlowThickness > 0.f && centerHot)
+      {
+         for (int glowLayer = 0; glowLayer < kGlowLayers; glowLayer++)
+         {
+            drawList->AddCircleFilled(gContext.mScreenSquareCenter, gContext.mStyle.CenterCircleSize + 0.5f * gContext.mStyle.GlowThickness * ((float)(kGlowLayers - glowLayer) / (float)kGlowLayers), GetGlowLayerColor(colors[0], glowLayer), 32);
+         }
+      }
+      drawList->AddCircleFilled(gContext.mScreenSquareCenter, gContext.mStyle.CenterCircleSize, GetColorU32(CENTER_FILL), 32);
+      drawList->AddCircle(gContext.mScreenSquareCenter, gContext.mStyle.CenterCircleSize, centerHot ? colors[0] : GetColorU32(CENTER_BORDER), 32, 2.0f);
+      drawList->AddCircleFilled(gContext.mScreenSquareCenter, gContext.mStyle.CenterCircleSize * 0.4f, centerHot ? colors[0] : GetColorU32(CENTER_BORDER), 16);
 
       if (gContext.mbUsing && (gContext.GetCurrentID() == gContext.mEditingID) && IsTranslateType(type))
       {
@@ -2094,7 +2165,7 @@ namespace IMGUIZMO_NAMESPACE
          const ImVec2 distanceOnScreen = idealPosOnCircleScreen - io.MousePos;
 
          const float distance = makeVect(distanceOnScreen).Length();
-         if (distance < 8.f) // pixel size
+         if (distance < gContext.mStyle.HitProximity) // pixel size
          {
             if ((!isAxisMasked || isMultipleAxesMasked) && !isNoAxesMasked)
                break;
@@ -2732,6 +2803,11 @@ namespace IMGUIZMO_NAMESPACE
    void SetGizmoSizeClipSpace(float value)
    {
       gContext.mGizmoSizeClipSpace = value;
+   }
+
+   void SetGizmoMaxScreenFraction(float value)
+   {
+      gContext.mGizmoMaxScreenFraction = value;
    }
 
    ///////////////////////////////////////////////////////////////////////////////////////////////////

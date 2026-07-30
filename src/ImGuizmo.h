@@ -259,6 +259,9 @@ namespace IMGUIZMO_NAMESPACE
    // return true if the cursor is over the operation's gizmo
    IMGUI_API bool IsOver(OPERATION op);
    IMGUI_API void SetGizmoSizeClipSpace(float value);
+   // Clamp the gizmo's on-screen axis length to a fraction of the smaller viewport dimension (0 = no clamp).
+   // Bounds the near-plane blow-up where the projected size estimate degenerates and the gizmo fills the screen.
+   IMGUI_API void SetGizmoMaxScreenFraction(float value);
 
    // Allow axis to flip
    // When true (default), the guizmo axis flip for better visibility
@@ -291,6 +294,8 @@ namespace IMGUIZMO_NAMESPACE
       HATCHED_AXIS_LINES,
       TEXT,
       TEXT_SHADOW,
+      CENTER_FILL,      // fill of the center pivot circle
+      CENTER_BORDER,    // ring + inner dot of the center pivot circle
       COUNT
    };
 
@@ -306,6 +311,9 @@ namespace IMGUIZMO_NAMESPACE
       float ScaleLineCircleSize;        // Size of circle at the end of lines for scale gizmo
       float HatchedAxisLineThickness;   // Thickness of hatched axis lines
       float CenterCircleSize;           // Size of circle at the center of the translate/scale gizmo
+      float GlowThickness;              // Extra stroke width drawn under hovered/active handles (0 = glow disabled)
+      float GlowAlpha;                  // Alpha multiplier applied to the handle color for the glow underlay
+      float HitProximity;               // Pixel pick distance for the rotation rings (stock 8)
 
       ImVec4 Colors[COLOR::COUNT];
    };
