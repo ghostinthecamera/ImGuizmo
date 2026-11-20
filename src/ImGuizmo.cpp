@@ -1067,7 +1067,7 @@ namespace IMGUIZMO_NAMESPACE
    {
       return (Intersects(gContext.mOperation, TRANSLATE) && GetMoveType(gContext.mOperation, NULL) != MT_NONE) ||
          (Intersects(gContext.mOperation, ROTATE) && GetRotateType(gContext.mOperation) != MT_NONE) ||
-         (Intersects(gContext.mOperation, SCALE) && GetScaleType(gContext.mOperation) != MT_NONE) || IsUsing();
+         ((Intersects(gContext.mOperation, SCALE) || Intersects(gContext.mOperation, SCALEU)) && GetScaleType(gContext.mOperation) != MT_NONE) || IsUsing();
    }
 
    bool IsOver(OPERATION op)
@@ -1076,7 +1076,7 @@ namespace IMGUIZMO_NAMESPACE
       {
          return true;
       }
-      if(Intersects(op, SCALE) && GetScaleType(op) != MT_NONE)
+      if((Intersects(op, SCALE) || Intersects(op, SCALEU)) && GetScaleType(op) != MT_NONE)
       {
          return true;
       }
@@ -1316,21 +1316,12 @@ namespace IMGUIZMO_NAMESPACE
       return angle;
    }
 
-   static void DrawRotationGizmo(OPERATION op, int type)
+   // The rotation rings as DrawRotationGizmo draws them. GetRotateType tests the mouse against the same points, so a ring is picked where it is seen.
+   // Ring index: 0 = the Z ring (MT_ROTATE_Z), 1 = Y, 2 = X.
+
+   // The direction toward the camera in model space; it chooses the camera-facing half of each ring
+   static vec_t GetRotationViewDirection()
    {
-      if(!Intersects(op, ROTATE))
-      {
-         return;
-      }
-      ImDrawList* drawList = gContext.mDrawList;
-
-      bool isMultipleAxesMasked = (gContext.mAxisMask & (gContext.mAxisMask - 1)) != 0;
-      bool isNoAxesMasked = !gContext.mAxisMask;
-
-      // colors
-      ImU32 colors[7];
-      ComputeColors(colors, type, ROTATE);
-
       vec_t viewDirNormalized;
       matrix_t viewInverse;
       if (gContext.mIsOrthographic)
@@ -1349,21 +1340,84 @@ namespace IMGUIZMO_NAMESPACE
       }
 
       viewDirNormalized.TransformVector(gContext.mModelInverse);
+      return viewDirNormalized;
+   }
 
+   static bool IsRotationRingShown(OPERATION op, int axis)
+   {
+      if (!Intersects(op, static_cast<OPERATION>(ROTATE_Z >> axis)))
+      {
+         return false;
+      }
+      const bool isMultipleAxesMasked = (gContext.mAxisMask & (gContext.mAxisMask - 1)) != 0;
+      const bool isNoAxesMasked = !gContext.mAxisMask;
+      const bool isAxisMasked = ((1 << (2 - axis)) & gContext.mAxisMask) != 0;
+      return !((!isAxisMasked || isMultipleAxesMasked) && !isNoAxesMasked);
+   }
+
+   static float GetRotationRingStartAngle(int axis, const vec_t& viewDirNormalized)
+   {
+      const bool rightHanded = gContext.mProjectionMat.m[2][3] < 0.f;
+      return atan2f(viewDirNormalized[(4 - axis) % 3], viewDirNormalized[(3 - axis) % 3]) + (gContext.mIsOrthographic ? ZPI : -ZPI) * 0.5f + (rightHanded ? 0.f : ZPI);
+   }
+
+   static ImVec2 GetRotationRingPoint(int axis, float angle)
+   {
+      vec_t axisPos = makeVect(cosf(angle), sinf(angle), 0.f);
+      vec_t pos = makeVect(axisPos[axis], axisPos[(axis + 1) % 3], axisPos[(axis + 2) % 3]) * gContext.mScreenFactor * rotationDisplayFactor;
+      return worldToPos(pos, gContext.mMVP);
+   }
+
+   // circleMul 1 = the camera-facing half, 2 = the full ring; points holds circleMul * halfCircleSegmentCount + 1 entries
+   static void GetRotationRingPoints(int axis, int circleMul, const vec_t& viewDirNormalized, ImVec2* points)
+   {
+      const float angleStart = GetRotationRingStartAngle(axis, viewDirNormalized);
+      for (int i = 0; i < circleMul * halfCircleSegmentCount + 1; i++)
+      {
+         points[i] = GetRotationRingPoint(axis, angleStart + (float)circleMul * ZPI * ((float)i / (float)(circleMul * halfCircleSegmentCount)));
+      }
+   }
+
+   // The screen ring hugs the widest ring shown, measured at a ring's start point
+   static float GetScreenRotationRadius(OPERATION op, const vec_t& viewDirNormalized)
+   {
       // Scale the screen-ring floor with the gizmo size setting (ratio 1 at the stock 0.1 default) so a resized gizmo keeps the ring hugging the axis rings.
-      gContext.mRadiusSquareCenter = screenRotateSize * gContext.mHeight * (gContext.mGizmoSizeClipSpace / 0.1f);
+      float radius = screenRotateSize * gContext.mHeight * (gContext.mGizmoSizeClipSpace / 0.1f);
+      const ImVec2 center = worldToPos(gContext.mModel.v.position, gContext.mViewProjection);
+      for (int axis = 0; axis < 3; axis++)
+      {
+         if (!IsRotationRingShown(op, axis))
+         {
+            continue;
+         }
+         const float radiusAxis = sqrtf(ImLengthSqr(center - GetRotationRingPoint(axis, GetRotationRingStartAngle(axis, viewDirNormalized))));
+         radius = ImMax(radius, radiusAxis);
+      }
+      return radius;
+   }
+
+   static void DrawRotationGizmo(OPERATION op, int type)
+   {
+      if(!Intersects(op, ROTATE))
+      {
+         return;
+      }
+      ImDrawList* drawList = gContext.mDrawList;
+
+      bool isMultipleAxesMasked = (gContext.mAxisMask & (gContext.mAxisMask - 1)) != 0;
+      bool isNoAxesMasked = !gContext.mAxisMask;
+
+      // colors
+      ImU32 colors[7];
+      ComputeColors(colors, type, ROTATE);
+
+      const vec_t viewDirNormalized = GetRotationViewDirection();
+      gContext.mRadiusSquareCenter = GetScreenRotationRadius(op, viewDirNormalized);
 
       bool hasRSC = Intersects(op, ROTATE_SCREEN);
       for (int axis = 0; axis < 3; axis++)
       {
-         if(!Intersects(op, static_cast<OPERATION>(ROTATE_Z >> axis)))
-         {
-            continue;
-         }
-
-         bool isAxisMasked = ((1 << (2 - axis)) & gContext.mAxisMask) != 0;
-
-         if ((!isAxisMasked || isMultipleAxesMasked) && !isNoAxesMasked)
+         if (!IsRotationRingShown(op, axis))
          {
             continue;
          }
@@ -1371,16 +1425,7 @@ namespace IMGUIZMO_NAMESPACE
          const int circleMul = (hasRSC && !usingAxis) ? 1 : 2;
 
          ImVec2* circlePos = (ImVec2*)alloca(sizeof(ImVec2) * (circleMul * halfCircleSegmentCount + 1));
-         const bool rightHanded = gContext.mProjectionMat.m[2][3] < 0.f;
-         float angleStart = atan2f(viewDirNormalized[(4 - axis) % 3], viewDirNormalized[(3 - axis) % 3]) + (gContext.mIsOrthographic ? ZPI : -ZPI) * 0.5f + (rightHanded ? 0.f : ZPI);
-
-         for (int i = 0; i < circleMul * halfCircleSegmentCount + 1; i++)
-         {
-            float ng = angleStart + (float)circleMul * ZPI * ((float)i / (float)(circleMul * halfCircleSegmentCount));
-            vec_t axisPos = makeVect(cosf(ng), sinf(ng), 0.f);
-            vec_t pos = makeVect(axisPos[axis], axisPos[(axis + 1) % 3], axisPos[(axis + 2) % 3]) * gContext.mScreenFactor * rotationDisplayFactor;
-            circlePos[i] = worldToPos(pos, gContext.mMVP);
-         }
+         GetRotationRingPoints(axis, circleMul, viewDirNormalized, circlePos);
          if (!gContext.mbUsing || usingAxis)
          {
             if (gContext.mStyle.GlowThickness > 0.f && type == MT_ROTATE_Z - axis)
@@ -1391,12 +1436,6 @@ namespace IMGUIZMO_NAMESPACE
                }
             }
             drawList->AddPolyline(circlePos, circleMul* halfCircleSegmentCount + 1, colors[3 - axis], gContext.mStyle.RotationLineThickness, 0);
-         }
-
-         float radiusAxis = sqrtf((ImLengthSqr(worldToPos(gContext.mModel.v.position, gContext.mViewProjection) - circlePos[0])));
-         if (radiusAxis > gContext.mRadiusSquareCenter)
-         {
-            gContext.mRadiusSquareCenter = radiusAxis;
          }
       }
       if(hasRSC && (!gContext.mbUsing || type == MT_ROTATE_SCREEN) && (!isMultipleAxesMasked && isNoAxesMasked))
@@ -2116,60 +2155,44 @@ namespace IMGUIZMO_NAMESPACE
          return MT_NONE;
       }
 
-      bool isNoAxesMasked = !gContext.mAxisMask;
-      bool isMultipleAxesMasked = (gContext.mAxisMask & (gContext.mAxisMask - 1)) != 0;
-
-      ImGuiIO& io = ImGui::GetIO();
+      // The mouse is tested against the rings as drawn, by its screen distance to their lines, so every part of a ring that is seen can be picked: the camera-facing
+      // half with the screen ring, the full ring without it. Where rings come within reach of each other, the nearest is picked.
+      const ImVec2 mousePos = ImGui::GetIO().MousePos;
+      const vec_t viewDirNormalized = GetRotationViewDirection();
       int type = MT_NONE;
+      float nearest = FLT_MAX;
 
-      vec_t deltaScreen = { io.MousePos.x - gContext.mScreenSquareCenter.x, io.MousePos.y - gContext.mScreenSquareCenter.y, 0.f, 0.f };
-      float dist = deltaScreen.Length();
-      if (Intersects(op, ROTATE_SCREEN) && dist >= (gContext.mRadiusSquareCenter - 4.0f) && dist < (gContext.mRadiusSquareCenter + 4.0f))
+      const bool hasRSC = Intersects(op, ROTATE_SCREEN);
+      if (hasRSC && !gContext.mAxisMask)
       {
-         if (!isNoAxesMasked)
-            return MT_NONE;
-         type = MT_ROTATE_SCREEN;
+         const float reach = ImMax(gContext.mStyle.HitProximity, gContext.mStyle.RotationOuterLineThickness * 0.5f + 2.f);
+         const ImVec2 center = worldToPos(gContext.mModel.v.position, gContext.mViewProjection);
+         const float distance = fabsf(sqrtf(ImLengthSqr(mousePos - center)) - GetScreenRotationRadius(op, viewDirNormalized));
+         if (distance < reach)
+         {
+            nearest = distance;
+            type = MT_ROTATE_SCREEN;
+         }
       }
 
-      const vec_t planNormals[] = { gContext.mModel.v.right, gContext.mModel.v.up, gContext.mModel.v.dir };
-
-      vec_t modelViewPos;
-      modelViewPos.TransformPoint(gContext.mModel.v.position, gContext.mViewMat);
-
-      for (int i = 0; i < 3 && type == MT_NONE; i++)
+      const float reach = ImMax(gContext.mStyle.HitProximity, gContext.mStyle.RotationLineThickness * 0.5f + 2.f);
+      const int circleMul = hasRSC ? 1 : 2;
+      ImVec2 ringPoints[2 * halfCircleSegmentCount + 1];
+      for (int axis = 0; axis < 3; axis++)
       {
-         if(!Intersects(op, static_cast<OPERATION>(ROTATE_X << i)))
+         if (!IsRotationRingShown(op, axis))
          {
             continue;
          }
-         bool isAxisMasked = ((1 << i) & gContext.mAxisMask) != 0;
-         // pickup plan
-         vec_t pickupPlan = BuildPlan(gContext.mModel.v.position, planNormals[i]);
-
-         const float len = IntersectRayPlane(gContext.mRayOrigin, gContext.mRayVector, pickupPlan);
-         const vec_t intersectWorldPos = gContext.mRayOrigin + gContext.mRayVector * len;
-         vec_t intersectViewPos;
-         intersectViewPos.TransformPoint(intersectWorldPos, gContext.mViewMat);
-
-         if (ImAbs(modelViewPos.z) - ImAbs(intersectViewPos.z) < -FLT_EPSILON)
+         GetRotationRingPoints(axis, circleMul, viewDirNormalized, ringPoints);
+         for (int i = 0; i < circleMul * halfCircleSegmentCount; i++)
          {
-            continue;
-         }
-
-         const vec_t localPos = intersectWorldPos - gContext.mModel.v.position;
-         vec_t idealPosOnCircle = Normalized(localPos);
-         idealPosOnCircle.TransformVector(gContext.mModelInverse);
-         const ImVec2 idealPosOnCircleScreen = worldToPos(idealPosOnCircle * rotationDisplayFactor * gContext.mScreenFactor, gContext.mMVP);
-
-         //gContext.mDrawList->AddCircle(idealPosOnCircleScreen, 5.f, IM_COL32_WHITE);
-         const ImVec2 distanceOnScreen = idealPosOnCircleScreen - io.MousePos;
-
-         const float distance = makeVect(distanceOnScreen).Length();
-         if (distance < gContext.mStyle.HitProximity) // pixel size
-         {
-            if ((!isAxisMasked || isMultipleAxesMasked) && !isNoAxesMasked)
-               break;
-            type = MT_ROTATE_X + i;
+            const float distance = sqrtf(ImLengthSqr(ImLineClosestPoint(ringPoints[i], ringPoints[i + 1], mousePos) - mousePos));
+            if (distance < reach && distance < nearest)
+            {
+               nearest = distance;
+               type = MT_ROTATE_Z - axis;
+            }
          }
       }
 
