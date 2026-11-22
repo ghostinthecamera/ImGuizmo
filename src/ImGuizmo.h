@@ -313,7 +313,7 @@ namespace IMGUIZMO_NAMESPACE
       float CenterCircleSize;           // Size of circle at the center of the translate/scale gizmo
       float GlowThickness;              // Extra stroke width drawn under hovered/active handles (0 = glow disabled)
       float GlowAlpha;                  // Alpha multiplier applied to the handle color for the glow underlay
-      float HitProximity;               // Pixel pick distance from a rotation ring's drawn line, screen ring included (stock 8); never less than half the line plus 2 px
+      float HitProximity;               // Pixel pick distance from a rotation ring's drawn line, screen ring included (stock 8; never less than half the line plus 2 px), and around a plane square
 
       ImVec4 Colors[COLOR::COUNT];
    };

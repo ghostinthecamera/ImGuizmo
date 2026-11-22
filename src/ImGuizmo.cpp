@@ -752,6 +752,7 @@ namespace IMGUIZMO_NAMESPACE
 
       float mAxisLimit=0.0025f;
       float mPlaneLimit=0.02f;
+      float mFaceOnPlaneSurface = 0.01f;
 
       // bounds stretching
       vec_t mBoundsPivot;
@@ -806,7 +807,7 @@ namespace IMGUIZMO_NAMESPACE
    static const char* scaleInfoMask[] = { "X : %5.2f", "Y : %5.2f", "Z : %5.2f", "XYZ : %5.2f" };
    static const char* rotationInfoMask[] = { "X : %5.2f deg %5.2f rad", "Y : %5.2f deg %5.2f rad", "Z : %5.2f deg %5.2f rad", "Screen : %5.2f deg %5.2f rad" };
    static const int translationInfoIndex[] = { 0,0,0, 1,0,0, 2,0,0, 1,2,0, 0,2,0, 0,1,0, 0,1,2 };
-   static const float quadMin = 0.5f;
+   static const float quadMin = 0.4f;
    static const float quadMax = 0.8f;
    static const float quadUV[8] = { quadMin, quadMin, quadMin, quadMax, quadMax, quadMax, quadMax, quadMin };
    static const int halfCircleSegmentCount = 64;
@@ -814,8 +815,8 @@ namespace IMGUIZMO_NAMESPACE
 
    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
    //
-   static int GetMoveType(OPERATION op, vec_t* gizmoHitProportion);
-   static int GetRotateType(OPERATION op);
+   static int GetMoveType(OPERATION op);
+   static int GetRotateType(OPERATION op, float* ringDistance = nullptr);
    static int GetScaleType(OPERATION op);
 
    Style& GetStyle()
@@ -1065,7 +1066,7 @@ namespace IMGUIZMO_NAMESPACE
 
    bool IsOver()
    {
-      return (Intersects(gContext.mOperation, TRANSLATE) && GetMoveType(gContext.mOperation, NULL) != MT_NONE) ||
+      return (Intersects(gContext.mOperation, TRANSLATE) && GetMoveType(gContext.mOperation) != MT_NONE) ||
          (Intersects(gContext.mOperation, ROTATE) && GetRotateType(gContext.mOperation) != MT_NONE) ||
          ((Intersects(gContext.mOperation, SCALE) || Intersects(gContext.mOperation, SCALEU)) && GetScaleType(gContext.mOperation) != MT_NONE) || IsUsing();
    }
@@ -1084,7 +1085,7 @@ namespace IMGUIZMO_NAMESPACE
       {
          return true;
       }
-      if(Intersects(op, TRANSLATE) && GetMoveType(op, NULL) != MT_NONE)
+      if(Intersects(op, TRANSLATE) && GetMoveType(op) != MT_NONE)
       {
          return true;
       }
@@ -1164,6 +1165,10 @@ namespace IMGUIZMO_NAMESPACE
             gContext.mScreenFactor *= maxPx / axisPx;
          }
       }
+
+      vec_t upViewInverse = viewInverse.v.up;
+      upViewInverse.TransformVector(gContext.mModelInverse);
+      gContext.mFaceOnPlaneSurface = GetParallelogram(makeVect(0.f, 0.f), rightViewInverse * gContext.mScreenFactor, upViewInverse * gContext.mScreenFactor);
 
       ImVec2 centerSSpace = worldToPos(makeVect(0.f, 0.f), gContext.mMVP);
       gContext.mScreenSquareCenter = centerSSpace;
@@ -1264,7 +1269,8 @@ namespace IMGUIZMO_NAMESPACE
 
          float paraSurf = GetParallelogram(makeVect(0.f, 0.f, 0.f), dirPlaneX * gContext.mScreenFactor, dirPlaneY * gContext.mScreenFactor);
          // Apply axis mask to axes and planes
-         belowPlaneLimit = (paraSurf > gContext.mAxisLimit) && (((1<<axisIndex) == gContext.mAxisMask) || !gContext.mAxisMask);
+         // mAxisLimit is for the stock gizmo size, whose face-on plane surface is 0.01: scaled to this gizmo's, so a plane is hidden at the same tilt at every gizmo and screen size
+         belowPlaneLimit = (paraSurf > gContext.mAxisLimit * (gContext.mFaceOnPlaneSurface / 0.01f)) && (((1<<axisIndex) == gContext.mAxisMask) || !gContext.mAxisMask);
          belowAxisLimit = (axisLengthInClipSpace > gContext.mPlaneLimit) && !((1<<axisIndex)&gContext.mAxisMask);
 
          // and store values
@@ -1274,6 +1280,30 @@ namespace IMGUIZMO_NAMESPACE
          gContext.mBelowAxisLimit[axisIndex] = belowAxisLimit;
          gContext.mBelowPlaneLimit[axisIndex] = belowPlaneLimit;
       }
+   }
+
+   // A plane's square as DrawTranslationGizmo draws it. GetMoveType tests the mouse against the same points.
+   static void GetPlaneSquarePoints(const vec_t& dirPlaneX, const vec_t& dirPlaneY, ImVec2* points)
+   {
+      for (int i = 0; i < 4; i++)
+      {
+         vec_t corner = (dirPlaneX * quadUV[i * 2] + dirPlaneY * quadUV[i * 2 + 1]) * gContext.mScreenFactor;
+         points[i] = worldToPos(corner, gContext.mMVP);
+      }
+   }
+
+   static float GetDistanceToPlaneSquare(const ImVec2& position, const ImVec2* points)
+   {
+      if (ImTriangleContainsPoint(points[0], points[1], points[2], position) || ImTriangleContainsPoint(points[0], points[2], points[3], position))
+      {
+         return 0.f;
+      }
+      float distance = FLT_MAX;
+      for (int i = 0; i < 4; i++)
+      {
+         distance = ImMin(distance, sqrtf(ImLengthSqr(ImLineClosestPoint(points[i], points[(i + 1) % 4], position) - position)));
+      }
+      return distance;
    }
 
    static void ComputeSnap(float* value, float snap)
@@ -1724,11 +1754,7 @@ namespace IMGUIZMO_NAMESPACE
             if (belowPlaneLimit && Contains(op, TRANSLATE_PLANS[i]))
             {
                ImVec2 screenQuadPts[4];
-               for (int j = 0; j < 4; ++j)
-               {
-                  vec_t cornerWorldPos = (dirPlaneX * quadUV[j * 2] + dirPlaneY * quadUV[j * 2 + 1]) * gContext.mScreenFactor;
-                  screenQuadPts[j] = worldToPos(cornerWorldPos, gContext.mMVP);
-               }
+               GetPlaneSquarePoints(dirPlaneX, dirPlaneY, screenQuadPts);
                if (gContext.mStyle.GlowThickness > 0.f && type == MT_MOVE_YZ + i)
                {
                   for (int glowLayer = 0; glowLayer < kGlowLayers; glowLayer++)
@@ -1904,11 +1930,10 @@ namespace IMGUIZMO_NAMESPACE
             bool overSmallAnchor = ImLengthSqr(midBound - io.MousePos) <= (AnchorBigRadius * AnchorBigRadius);
 
             int type = MT_NONE;
-            vec_t gizmoHitProportion;
 
             if(Intersects(operation, TRANSLATE))
             {
-               type = GetMoveType(operation, &gizmoHitProportion);
+               type = GetMoveType(operation);
             }
             if(Intersects(operation, ROTATE) && type == MT_NONE)
             {
@@ -2148,7 +2173,7 @@ namespace IMGUIZMO_NAMESPACE
       return type;
    }
 
-   static int GetRotateType(OPERATION op)
+   static int GetRotateType(OPERATION op, float* ringDistance)
    {
       if (gContext.mbUsing)
       {
@@ -2196,69 +2221,72 @@ namespace IMGUIZMO_NAMESPACE
          }
       }
 
+      if (ringDistance)
+      {
+         *ringDistance = nearest;
+      }
       return type;
    }
 
-   static int GetMoveType(OPERATION op, vec_t* gizmoHitProportion)
+   static int GetMoveType(OPERATION op)
    {
       if(!Intersects(op, TRANSLATE) || gContext.mbUsing || !gContext.mbMouseOver)
       {
         return MT_NONE;
       }
 
-      bool isNoAxesMasked = !gContext.mAxisMask;
-      bool isMultipleAxesMasked = (gContext.mAxisMask & (gContext.mAxisMask - 1)) != 0;
-
-      ImGuiIO& io = ImGui::GetIO();
-      int type = MT_NONE;
+      const ImVec2 mousePos = ImGui::GetIO().MousePos;
 
       // screen
-      if (io.MousePos.x >= gContext.mScreenSquareMin.x && io.MousePos.x <= gContext.mScreenSquareMax.x &&
-         io.MousePos.y >= gContext.mScreenSquareMin.y && io.MousePos.y <= gContext.mScreenSquareMax.y &&
+      if (mousePos.x >= gContext.mScreenSquareMin.x && mousePos.x <= gContext.mScreenSquareMax.x &&
+         mousePos.y >= gContext.mScreenSquareMin.y && mousePos.y <= gContext.mScreenSquareMax.y &&
          Contains(op, TRANSLATE))
       {
-         type = MT_MOVE_SCREEN;
+         return MT_MOVE_SCREEN;
       }
 
-      const vec_t screenCoord = makeVect(io.MousePos - ImVec2(gContext.mX, gContext.mY));
-
-      // compute
-      for (int i = 0; i < 3 && type == MT_NONE; i++)
+      // The arrows and the plane squares are tested by the mouse's screen distance to them, the nearest within reach is picked. Inside a square the distance is 0; where squares overlap, the one drawn on top is picked.
+      int type = MT_NONE;
+      float nearest = FLT_MAX;
+      for (int i = 0; i < 3; i++)
       {
-         bool isAxisMasked = ((1 << i) & gContext.mAxisMask) != 0;
+         const bool isAxisMasked = ((1 << i) & gContext.mAxisMask) != 0;
          vec_t dirPlaneX, dirPlaneY, dirAxis;
          bool belowAxisLimit, belowPlaneLimit;
          ComputeTripodAxisAndVisibility(i, dirAxis, dirPlaneX, dirPlaneY, belowAxisLimit, belowPlaneLimit);
-         dirAxis.TransformVector(gContext.mModel);
-         dirPlaneX.TransformVector(gContext.mModel);
-         dirPlaneY.TransformVector(gContext.mModel);
 
-         const float len = IntersectRayPlane(gContext.mRayOrigin, gContext.mRayVector, BuildPlan(gContext.mModel.v.position, dirAxis));
-         vec_t posOnPlan = gContext.mRayOrigin + gContext.mRayVector * len;
-
-         const ImVec2 axisStartOnScreen = worldToPos(gContext.mModel.v.position + dirAxis * gContext.mScreenFactor * 0.1f, gContext.mViewProjection) - ImVec2(gContext.mX, gContext.mY);
-         const ImVec2 axisEndOnScreen = worldToPos(gContext.mModel.v.position + dirAxis * gContext.mScreenFactor, gContext.mViewProjection) - ImVec2(gContext.mX, gContext.mY);
-
-         vec_t closestPointOnAxis = PointOnSegment(screenCoord, makeVect(axisStartOnScreen), makeVect(axisEndOnScreen));
-         if ((closestPointOnAxis - screenCoord).Length() < 12.f && Intersects(op, static_cast<OPERATION>(TRANSLATE_X << i))) // pixel size
+         if (!isAxisMasked && Intersects(op, static_cast<OPERATION>(TRANSLATE_X << i)))
          {
-            if (isAxisMasked)
-               break;
-            type = MT_MOVE_X + i;
+            const ImVec2 axisStart = worldToPos(dirAxis * gContext.mScreenFactor * 0.1f, gContext.mMVP);
+            const ImVec2 axisEnd = worldToPos(dirAxis * gContext.mScreenFactor, gContext.mMVP);
+            const float distance = sqrtf(ImLengthSqr(ImLineClosestPoint(axisStart, axisEnd, mousePos) - mousePos));
+            if (distance < 12.f && distance < nearest) // pixel size
+            {
+               nearest = distance;
+               type = MT_MOVE_X + i;
+            }
          }
 
-         const float dx = dirPlaneX.Dot3((posOnPlan - gContext.mModel.v.position) * (1.f / gContext.mScreenFactor));
-         const float dy = dirPlaneY.Dot3((posOnPlan - gContext.mModel.v.position) * (1.f / gContext.mScreenFactor));
-         if (belowPlaneLimit && dx >= quadUV[0] && dx <= quadUV[4] && dy >= quadUV[1] && dy <= quadUV[3] && Contains(op, TRANSLATE_PLANS[i]))
+         if (belowPlaneLimit && Contains(op, TRANSLATE_PLANS[i]))
          {
-            if ((!isAxisMasked || isMultipleAxesMasked) && !isNoAxesMasked)
-               break;
-            type = MT_MOVE_YZ + i;
+            ImVec2 squarePoints[4];
+            GetPlaneSquarePoints(dirPlaneX, dirPlaneY, squarePoints);
+            const float distance = GetDistanceToPlaneSquare(mousePos, squarePoints);
+            if (distance <= gContext.mStyle.HitProximity && distance <= nearest)
+            {
+               nearest = distance;
+               type = MT_MOVE_YZ + i;
+            }
          }
+      }
 
-         if (gizmoHitProportion)
+      // Around a square (not inside it), a rotation ring nearer to the mouse is picked instead
+      if (type >= MT_MOVE_YZ && nearest > 0.f && Intersects(op, ROTATE))
+      {
+         float ringDistance;
+         if (GetRotateType(op, &ringDistance) != MT_NONE && ringDistance < nearest)
          {
-            *gizmoHitProportion = makeVect(dx, dy, 0.f);
+            return MT_NONE;
          }
       }
       return type;
@@ -2348,8 +2376,7 @@ namespace IMGUIZMO_NAMESPACE
       else
       {
          // find new possible way to move
-         vec_t gizmoHitProportion;
-         type = gContext.mbOverGizmoHotspot ? MT_NONE : GetMoveType(op, &gizmoHitProportion);
+         type = gContext.mbOverGizmoHotspot ? MT_NONE : GetMoveType(op);
          gContext.mbOverGizmoHotspot |= type != MT_NONE;
          if (type != MT_NONE)
          {
