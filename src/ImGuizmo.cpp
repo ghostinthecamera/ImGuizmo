@@ -868,11 +868,25 @@ namespace IMGUIZMO_NAMESPACE
    {
       ImGuiIO& io = ImGui::GetIO();
 
-      matrix_t mViewProjInverse;
-      mViewProjInverse.Inverse(gContext.mViewMat * gContext.mProjectionMat);
-
       const float mox = ((io.MousePos.x - position.x) / size.x) * 2.f - 1.f;
       const float moy = (1.f - ((io.MousePos.y - position.y) / size.y)) * 2.f - 1.f;
+
+      // A perspective ray starts at the camera and is found from the projection and the view's rotation alone, so neither a large world position nor the near/far range costs it precision
+      const matrix_t& projection = gContext.mProjectionMat;
+      if (!gContext.mIsOrthographic && fabsf(projection.m[2][3]) > FLT_EPSILON)
+      {
+         const float viewZ = 1.f / projection.m[2][3]; // w == 1: in front of the camera in either handedness
+         const vec_t viewDirection = makeVect((mox - viewZ * projection.m[2][0]) / projection.m[0][0], (moy - viewZ * projection.m[2][1]) / projection.m[1][1], viewZ, 0.f);
+         matrix_t viewInverse;
+         viewInverse.Inverse(gContext.mViewMat);
+         rayDir.TransformVector(viewDirection, viewInverse);
+         rayDir = Normalized(rayDir);
+         rayOrigin = viewInverse.v.position;
+         return;
+      }
+
+      matrix_t mViewProjInverse;
+      mViewProjInverse.Inverse(gContext.mViewMat * gContext.mProjectionMat);
 
       const float zNear = gContext.mReversed ? (1.f - FLT_EPSILON) : 0.f;
       const float zFar = gContext.mReversed ? 0.f : (1.f - FLT_EPSILON);
